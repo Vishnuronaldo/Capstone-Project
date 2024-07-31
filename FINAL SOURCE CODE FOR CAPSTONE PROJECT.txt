@@ -1,0 +1,104 @@
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+#include <linux/slab.h>
+#include <linux/sysinfo.h>
+#include <linux/timer.h>
+#include <linux/seq_file.h>
+#include <linux/proc_fs.h>
+ 
+#define DEVICE_NAME "sys_metrics"
+#define CLASS_NAME "sys_metrics_class"
+#define INTERVAL 5 // Timer interval in seconds
+ 
+static int major_number;
+static struct class *sys_metrics_class = NULL;
+static struct device *sys_metrics_device = NULL;
+static struct timer_list my_timer;
+static char metrics_buffer[PAGE_SIZE];
+static DEFINE_MUTEX(metrics_mutex);
+ 
+// Forward declarations
+static ssize_t device_read(struct file *file_ptr, char __user *buffer, size_t length, loff_t *offset);
+static void print_system_metrics(struct timer_list *timer);
+ 
+static struct file_operations fops = {
+    .read = device_read,
+};
+ 
+static void print_system_metrics(struct timer_list *timer) {
+    struct sysinfo si;
+    si_meminfo(&si);
+ 
+    unsigned long totalram = si.totalram << (PAGE_SHIFT - 10);
+    unsigned long freeram = si.freeram << (PAGE_SHIFT - 10);
+    unsigned long cachedram = si.cachedram << (PAGE_SHIFT - 10);
+ 
+    snprintf(metrics_buffer, PAGE_SIZE,
+             "Total RAM: %lu kB\nFree RAM: %lu kB\nCached RAM: %lu kB\n",
+             totalram, freeram, cachedram);
+ 
+    mod_timer(&my_timer, jiffies + msecs_to_jiffies(INTERVAL * 1000));
+}
+ 
+static ssize_t device_read(struct file *file_ptr, char __user *buffer, size_t length, loff_t *offset) {
+    size_t len = strlen(metrics_buffer);
+ 
+    if (*offset >= len)
+        return 0;
+ 
+    if (length > len - *offset)
+        length = len - *offset;
+ 
+    if (copy_to_user(buffer, metrics_buffer + *offset, length) != 0)
+        return -EFAULT;
+ 
+    *offset += length;
+    return length;
+}
+ 
+static int __init sys_metrics_init(void) {
+    major_number = register_chrdev(0, DEVICE_NAME, &fops);
+    if (major_number < 0) {
+        printk(KERN_ALERT "Failed to register a major number\n");
+        return major_number;
+    }
+ 
+    sys_metrics_class = class_create(THIS_MODULE, CLASS_NAME);
+    if (IS_ERR(sys_metrics_class)) {
+        unregister_chrdev(major_number, DEVICE_NAME);
+        printk(KERN_ALERT "Failed to register device class\n");
+        return PTR_ERR(sys_metrics_class);
+    }
+ 
+    sys_metrics_device = device_create(sys_metrics_class, NULL, MKDEV(major_number, 0), NULL, DEVICE_NAME);
+    if (IS_ERR(sys_metrics_device)) {
+        class_destroy(sys_metrics_class);
+        unregister_chrdev(major_number, DEVICE_NAME);
+        printk(KERN_ALERT "Failed to create the device\n");
+        return PTR_ERR(sys_metrics_device);
+    }
+ 
+    timer_setup(&my_timer, print_system_metrics, 0);
+    mod_timer(&my_timer, jiffies + msecs_to_jiffies(INTERVAL * 1000));
+ 
+    printk(KERN_INFO "sys_metrics: Device class created correctly\n");
+    return 0;
+}
+ 
+static void __exit sys_metrics_exit(void) {
+    del_timer(&my_timer);
+    device_destroy(sys_metrics_class, MKDEV(major_number, 0));
+    class_destroy(sys_metrics_class);
+    unregister_chrdev(major_number, DEVICE_NAME);
+    printk(KERN_INFO "sys_metrics: Goodbye from the LKM!\n");
+}
+ 
+module_init(sys_metrics_init);
+module_exit(sys_metrics_exit);
+ 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Vishnu J P");
+MODULE_DESCRIPTION("A Linux char driver for system metrics.");
+MODULE_VERSION("0.1");
